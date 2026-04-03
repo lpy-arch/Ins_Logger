@@ -391,13 +391,14 @@ function InsLogger() {
 
   return (
     <div style={{
-      height: "100%", display: "flex", flexDirection: "column",
+      position: "fixed", inset: 0,
       background: "#0f0f1a", color: "#fff",
       fontFamily: "'SF Mono', 'Fira Code', monospace",
       userSelect: "none", WebkitUserSelect: "none",
+      display: "flex", flexDirection: "column",
     }}>
       {/* Top bar */}
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px", borderBottom: "1px solid rgba(255,255,255,0.08)", flexShrink: 0 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px", borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
         <span style={{ fontSize: 14, fontWeight: 700, letterSpacing: 2, color: "rgba(255,255,255,0.6)" }}>INS LOGGER</span>
         <div style={{ display: "flex", gap: 8, position: "relative" }}>
           <button onClick={() => setView("history")} style={pillBtn}>History</button>
@@ -415,8 +416,8 @@ function InsLogger() {
         </div>
       </div>
 
-      {/* Text area */}
-      <div style={{ flex: 1, padding: "12px 16px 0", display: "flex", flexDirection: "column", overflow: "hidden", minHeight: 0 }}>
+      {/* Text area — fills middle */}
+      <div style={{ flex: 1, padding: "12px 16px 0", overflow: "hidden", display: "flex", flexDirection: "column", minHeight: 0 }}>
         <textarea ref={textareaRef} value={text} onChange={(e) => setText(e.target.value)}
           placeholder="What's on your mind..."
           style={{
@@ -429,9 +430,14 @@ function InsLogger() {
           }} />
       </div>
 
-      {/* Tags + Log button — fixed bottom */}
-      <div style={{ flexShrink: 0, padding: "8px 16px", paddingBottom: "max(12px, env(safe-area-inset-bottom))" }}>
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 10 }}>
+      {/* Bottom bar — tags + LOG */}
+      <div style={{
+        padding: "8px 16px",
+        paddingBottom: "calc(8px + env(safe-area-inset-bottom, 0px))",
+        background: "#0f0f1a",
+        borderTop: "1px solid rgba(255,255,255,0.06)",
+      }}>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 8 }}>
           {tags.map((tag) => {
             const sel = selectedTags.includes(tag);
             const c = getTagColor(tag, tags);
@@ -454,7 +460,7 @@ function InsLogger() {
         )}
         <button onClick={handleLog} disabled={!hasContent || isLogging}
           style={{
-            width: "100%", height: 46, borderRadius: 12,
+            width: "100%", height: 44, borderRadius: 12,
             background: isLogging ? "rgba(255,230,77,0.08)" : hasContent ? "rgba(78,205,196,0.12)" : "rgba(255,255,255,0.03)",
             border: isLogging ? "1.5px solid rgba(255,230,77,0.3)" : hasContent ? "1.5px solid rgba(78,205,196,0.3)" : "1.5px solid rgba(255,255,255,0.06)",
             color: isLogging ? "#FFE66D" : hasContent ? "#4ECDC4" : "rgba(255,255,255,0.15)",
