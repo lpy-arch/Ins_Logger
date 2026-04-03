@@ -416,30 +416,29 @@ function InsLogger() {
       </div>
 
       {/* Text area */}
-      <div style={{ flex: 1, padding: "16px 16px 0", display: "flex", flexDirection: "column", overflow: "hidden" }}>
+      <div style={{ flex: 1, padding: "12px 16px 0", display: "flex", flexDirection: "column", overflow: "hidden", minHeight: 0 }}>
         <textarea ref={textareaRef} value={text} onChange={(e) => setText(e.target.value)}
           placeholder="What's on your mind..."
           style={{
-            flex: 1, width: "100%", minHeight: 120,
+            flex: 1, width: "100%", minHeight: 0,
             background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)",
-            borderRadius: 12, color: "#fff", padding: 16, fontSize: 15,
+            borderRadius: 12, color: "#fff", padding: 14, fontSize: 15,
             fontFamily: "inherit", resize: "none", outline: "none",
             boxSizing: "border-box", lineHeight: 1.7,
             userSelect: "text", WebkitUserSelect: "text",
           }} />
       </div>
 
-      {/* Tags */}
-      <div style={{ padding: "12px 16px 0", flexShrink: 0 }}>
-        <div style={{ fontSize: 10, color: "rgba(255,255,255,0.2)", marginBottom: 8, letterSpacing: 1 }}>TAGS</div>
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+      {/* Tags + Log button — fixed bottom */}
+      <div style={{ flexShrink: 0, padding: "8px 16px", paddingBottom: "max(12px, env(safe-area-inset-bottom))" }}>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 10 }}>
           {tags.map((tag) => {
             const sel = selectedTags.includes(tag);
             const c = getTagColor(tag, tags);
             return (
               <button key={tag} onClick={() => toggleTag(tag)}
                 style={{
-                  padding: "6px 14px", borderRadius: 8, fontSize: 12, fontWeight: 600,
+                  padding: "5px 12px", borderRadius: 8, fontSize: 12, fontWeight: 600,
                   cursor: "pointer", fontFamily: "inherit", transition: "all 0.15s",
                   background: sel ? c + "20" : "rgba(255,255,255,0.04)",
                   color: sel ? c : "rgba(255,255,255,0.4)",
@@ -448,18 +447,14 @@ function InsLogger() {
             );
           })}
         </div>
-      </div>
-
-      {/* Log button */}
-      <div style={{ padding: 16, flexShrink: 0 }}>
         {logState === "error" && (
-          <div style={{ fontSize: 11, color: "#FF6B6B", marginBottom: 8, lineHeight: 1.5 }}>
+          <div style={{ fontSize: 11, color: "#FF6B6B", marginBottom: 6, lineHeight: 1.5 }}>
             Failed: {logError}
           </div>
         )}
         <button onClick={handleLog} disabled={!hasContent || isLogging}
           style={{
-            width: "100%", height: 52, borderRadius: 14,
+            width: "100%", height: 46, borderRadius: 12,
             background: isLogging ? "rgba(255,230,77,0.08)" : hasContent ? "rgba(78,205,196,0.12)" : "rgba(255,255,255,0.03)",
             border: isLogging ? "1.5px solid rgba(255,230,77,0.3)" : hasContent ? "1.5px solid rgba(78,205,196,0.3)" : "1.5px solid rgba(255,255,255,0.06)",
             color: isLogging ? "#FFE66D" : hasContent ? "#4ECDC4" : "rgba(255,255,255,0.15)",
@@ -472,6 +467,7 @@ function InsLogger() {
       </div>
 
       {toast && <div style={toastStyle}>{toast}</div>}
+      {showMore && <div onClick={() => setShowMore(false)} style={{ position: "fixed", inset: 0, zIndex: 40 }} />}
     </div>
   );
 }
