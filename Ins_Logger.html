@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="InsLogger">
+<meta name="theme-color" content="#0f0f1a">
+<title>Ins Logger</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body, #root { height: 100%; height: 100dvh; width: 100%; overflow: hidden; background: #0f0f1a; }
+  body { padding-top: env(safe-area-inset-top); }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+<script type="text/babel" data-type="module">
+const { useState, useRef, useEffect } = React;
+
+const CONFIG_KEY = "ins_logger_config";
+const CACHE_KEY = "ins_logger_cache";
+const TAGS_KEY = "ins_logger_tags";
+const DEFAULT_TAGS = ["idea", "thought", "todo", "quote", "dream", "random"];
+
+const TAG_COLORS = [
+  "#4ECDC4", "#FF6B6B", "#FFE66D", "#A78BFA",
+  "#F472B6", "#34D399", "#FB923C", "#60A5FA",
+  "#E879F9", "#2DD4BF", "#FBBF24", "#818CF8",
+];
+
+const getTagColor = (tag, allTags) => {
+  const idx = allTags.indexOf(tag);
+  return TAG_COLORS[idx >= 0 ? idx % TAG_COLORS.length : Math.abs(tag.charCodeAt(0)) % TAG_COLORS.length];
+};
+
+const pad = (n) => String(n).padStart(2, "0");
+
+const formatDate = (ts) => {
+  const d = new Date(ts);
+  return `${d.getFullYear()}/${pad(d.getMonth() + 1)}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+};
+
+const formatDateShort = (ts) => {
+  const d = new Date(ts);
+  return `${pad(d.getMonth() + 1)}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+};
+
+// --- Base64 UTF-8 ---
+function utf8ToBase64(str) {
+  const bytes = new TextEncoder().encode(str);
+  let bin = "";
+  bytes.forEach((b) => (bin += String.fromCharCode(b)));
+  return btoa(bin);
+}
+function base64ToUtf8(b64) {
+  const bin = atob(b64.replace(/\n/g, ""));
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new TextDecoder().decode(bytes);
+}
+
+// --- GitHub API ---
+async function githubGet(config) {
+  const res = await fetch(
+    `https://api.github.com/repos/${config.repo}/contents/${config.filePath}`,
+    { headers: { Authorization: `token ${config.token}`, Accept: "application/vnd.github.v3+json" } }
+  );
+  if (res.status === 404) return { content: "", sha: null };
+  if (!res.ok) throw new Error(`API ${res.status}: ${(await res.json().catch(() => ({}))).message || "error"}`);
+  const data = await res.json();
+  return { content: base64ToUtf8(data.content), sha: data.sha };
+}
+
+async function githubPut(config, content, sha) {
+  const body = { message: `log ${formatDate(Date.now())}`, content: utf8ToBase64(content) };
+  if (sha) body.sha = sha;
+  const res = await fetch(
+    `https://api.github.com/repos/${config.repo}/contents/${config.filePath}`,
+    {
+      method: "PUT",
+      headers: { Authorization: `token ${config.token}`, Accept: "application/vnd.github.v3+json", "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }
+  );
+  if (!res.ok) throw new Error(`API ${res.status}: ${(await res.json().catch(() => ({}))).message || "error"}`);
+  return await res.json();
+}
+
+// --- Log Format ---
+function formatLogEntry(ts, tags, text) {
+  const tagStr = tags.length > 0 ? tags.join(", ") : "-";
+  const lines = text.split("\n");
+  let entry = `[${formatDate(ts)}] [${tagStr}] ${lines[0]}`;
+  for (let i = 1; i < lines.length; i++) entry += `\n    ${lines[i]}`;
+  return entry;
+}
+
+function parseLogFile(content) {
+  if (!content.trim()) return [];
+  const entries = [];
+  const lines = content.split("\n");
+  let current = null;
+  for (const line of lines) {
+    const m = line.match(/^\[(\d{4}\/\d{2}\/\d{2} \d{2}:\d{2}:\d{2})\] \[([^\]]*)\] (.*)$/);
+    if (m) {
+      if (current) entries.push(current);
+      const [, dateStr, tagStr, text] = m;
+      const tags = tagStr === "-" ? [] : tagStr.split(",").map((t) => t.trim()).filter(Boolean);
+      const [dp, tp] = dateStr.split(" ");
+      const [y, mo, d] = dp.split("/").map(Number);
+      const [h, mi, s] = tp.split(":").map(Number);
+      current = { ts: new Date(y, mo - 1, d, h, mi, s).getTime(), tags, text };
+    } else if (current && line.startsWith("    ")) {
+      current.text += "\n" + line.slice(4);
+    }
+  }
+  if (current) entries.push(current);
+  return entries;
+}
+
+// --- Persistence helpers ---
+const loadConfig = () => { try { return JSON.parse(localStorage.getItem(CONFIG_KEY)); } catch { return null; } };
+const saveConfig = (c) => localStorage.setItem(CONFIG_KEY, JSON.stringify(c));
+const loadCache = () => { try { return localStorage.getItem(CACHE_KEY) || ""; } catch { return ""; } };
+const saveCache = (c) => { try { localStorage.setItem(CACHE_KEY, c); } catch {} };
+const loadTags = () => { try { const s = localStorage.getItem(TAGS_KEY); return s ? JSON.parse(s) : DEFAULT_TAGS; } catch { return DEFAULT_TAGS; } };
+const saveTags = (t) => { try { localStorage.setItem(TAGS_KEY, JSON.stringify(t)); } catch {} };
+
+// --- Setup View ---
+function SetupView({ initial, onSave }) {
+  const [repo, setRepo] = useState(initial?.repo || "");
+  const [token, setToken] = useState(initial?.token || "");
+  const [filePath, setFilePath] = useState(initial?.filePath || "Log.log");
+  const [testing, setTesting] = useState(false);
+  const [result, setResult] = useState("");
+
+  const handleTest = async () => {
+    if (!repo || !token) { setResult("Please fill in all fields"); return; }
+    setTesting(true); setResult("");
+    try {
+      await githubGet({ repo, token, filePath });
+      setResult("Connected successfully");
+    } catch (e) {
+      setResult("Failed: " + e.message);
+    }
+    setTesting(false);
+  };
+
+  const handleSave = () => {
+    if (!repo || !token) return;
+    onSave({ repo, token, filePath });
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", background: "#0f0f1a", color: "#fff", fontFamily: "'SF Mono', 'Fira Code', monospace", overflow: "auto" }}>
+      <div style={{ padding: "12px 16px", borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
+        <span style={{ fontSize: 14, fontWeight: 700, letterSpacing: 2, color: "rgba(255,255,255,0.6)" }}>SETUP</span>
+      </div>
+      <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 20 }}>
+        <div style={{ fontSize: 12, color: "rgba(255,255,255,0.35)", lineHeight: 1.8 }}>
+          Create a <span style={{ color: "#4ECDC4" }}>Fine-grained Personal Access Token</span> on GitHub:<br/>
+          Settings → Developer settings → Personal access tokens → Fine-grained tokens<br/>
+          Permission needed: Contents (Read and Write) on your repo
+        </div>
+
+        <div>
+          <div style={labelStyle}>Repository (owner/repo)</div>
+          <input value={repo} onChange={(e) => setRepo(e.target.value)} placeholder="e.g. username/my-notes"
+            style={inputStyle} />
+        </div>
+
+        <div>
+          <div style={labelStyle}>Token</div>
+          <input value={token} onChange={(e) => setToken(e.target.value)} type="password" placeholder="github_pat_..."
+            style={inputStyle} />
+        </div>
+
+        <div>
+          <div style={labelStyle}>File Path (in repo)</div>
+          <input value={filePath} onChange={(e) => setFilePath(e.target.value)} placeholder="Log.log"
+            style={inputStyle} />
+        </div>
+
+        {result && (
+          <div style={{ fontSize: 12, color: result.startsWith("Connected") ? "#34D399" : "#FF6B6B", padding: "4px 0" }}>
+            {result}
+          </div>
+        )}
+
+        <div style={{ display: "flex", gap: 10 }}>
+          <button onClick={handleTest} disabled={testing}
+            style={{ ...pillBtn, flex: 1, padding: "12px", fontSize: 13, textAlign: "center", opacity: testing ? 0.5 : 1 }}>
+            {testing ? "Testing..." : "Test Connection"}
+          </button>
+          <button onClick={handleSave}
+            style={{ ...pillBtn, flex: 1, padding: "12px", fontSize: 13, textAlign: "center", background: "rgba(78,205,196,0.12)", color: "#4ECDC4", border: "1px solid rgba(78,205,196,0.3)" }}>
+            Save
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// --- History View ---
+function HistoryView({ config, tags, onBack }) {
+  const [entries, setEntries] = useState(() => parseLogFile(loadCache()));
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { content } = await githubGet(config);
+        if (cancelled) return;
+        saveCache(content);
+        setEntries(parseLogFile(content));
+      } catch (e) {
+        if (!cancelled) setError(e.message);
+      }
+      if (!cancelled) setLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const sorted = [...entries].reverse();
+  const grouped = {};
+  sorted.forEach((e) => {
+    const d = new Date(e.ts);
+    const key = `${d.getFullYear()}/${pad(d.getMonth() + 1)}/${pad(d.getDate())}`;
+    if (!grouped[key]) grouped[key] = [];
+    grouped[key].push(e);
+  });
+  const dateKeys = Object.keys(grouped);
+
+  const [expandedIdx, setExpandedIdx] = useState(null);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", background: "#0f0f1a", color: "#fff", fontFamily: "'SF Mono', 'Fira Code', monospace" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 16px", borderBottom: "1px solid rgba(255,255,255,0.08)", flexShrink: 0 }}>
+        <button onClick={onBack} style={pillBtn}>← Back</button>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {loading && <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#FFE66D", animation: "pulse 1s infinite" }} />}
+          <span style={{ fontSize: 12, color: "rgba(255,255,255,0.3)" }}>{entries.length} entries</span>
+        </div>
+      </div>
+
+      <div style={{ flex: 1, overflow: "auto", padding: "4px 16px 80px" }}>
+        {error && <div style={{ padding: "12px 0", fontSize: 12, color: "#FF6B6B" }}>{error}</div>}
+        {dateKeys.length === 0 && !loading && (
+          <div style={{ textAlign: "center", padding: "60px 20px", color: "rgba(255,255,255,0.2)", fontSize: 14 }}>No entries yet</div>
+        )}
+        {dateKeys.map((dateKey) => (
+          <div key={dateKey}>
+            <div style={{ fontSize: 11, color: "rgba(255,255,255,0.25)", fontWeight: 700, letterSpacing: 1, padding: "14px 0 4px", borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
+              {dateKey}
+            </div>
+            {grouped[dateKey].map((entry, i) => {
+              const uid = entry.ts + "-" + i;
+              const isExpanded = expandedIdx === uid;
+              return (
+                <div key={uid} onClick={() => setExpandedIdx(isExpanded ? null : uid)}
+                  style={{ padding: "10px 0", borderBottom: "1px solid rgba(255,255,255,0.04)", cursor: "pointer" }}>
+                  <div style={{ fontSize: 10, color: "rgba(255,255,255,0.25)", marginBottom: 3 }}>{formatDateShort(entry.ts)}</div>
+                  <div style={{
+                    fontSize: 13, color: "rgba(255,255,255,0.8)", lineHeight: 1.5,
+                    ...(isExpanded ? { whiteSpace: "pre-wrap", wordBreak: "break-word" } : { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }),
+                  }}>
+                    {entry.text}
+                  </div>
+                  {entry.tags.length > 0 && (
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 5 }}>
+                      {entry.tags.map((t) => (
+                        <span key={t} style={{
+                          fontSize: 10, padding: "1px 7px", borderRadius: 4,
+                          background: getTagColor(t, tags) + "18", color: getTagColor(t, tags),
+                          border: `1px solid ${getTagColor(t, tags)}30`,
+                        }}>{t}</span>
+                      ))}
+                    </div>
+                  )}
+                  {isExpanded && (
+                    <div style={{ marginTop: 6 }} onClick={(e) => e.stopPropagation()}>
+                      <button onClick={() => navigator.clipboard.writeText(entry.text).catch(() => {})}
+                        style={{ ...pillBtn, fontSize: 10, padding: "3px 10px" }}>Copy</button>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        ))}
+      </div>
+      <style>{`@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }`}</style>
+    </div>
+  );
+}
+
+// --- Tag Editor ---
+function TagEditorView({ tags, onSave, onBack }) {
+  const [editText, setEditText] = useState(tags.join("\n"));
+  const handleSave = () => {
+    const t = editText.split("\n").map((s) => s.trim()).filter(Boolean);
+    if (t.length > 0) onSave(t);
+    onBack();
+  };
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", background: "#0f0f1a", color: "#fff", fontFamily: "'SF Mono', 'Fira Code', monospace" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 16px", borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
+        <button onClick={onBack} style={pillBtn}>← Back</button>
+        <span style={{ fontSize: 14, fontWeight: 700, letterSpacing: 1, color: "rgba(255,255,255,0.6)" }}>Edit Tags</span>
+      </div>
+      <div style={{ flex: 1, padding: 16, display: "flex", flexDirection: "column", gap: 12 }}>
+        <div style={{ fontSize: 12, color: "rgba(255,255,255,0.4)" }}>One tag per line</div>
+        <textarea value={editText} onChange={(e) => setEditText(e.target.value)}
+          style={{ flex: 1, width: "100%", background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 10, color: "#fff", padding: 14, fontSize: 14, fontFamily: "inherit", resize: "none", outline: "none", boxSizing: "border-box", lineHeight: 1.8 }} />
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+          <button onClick={onBack} style={{ ...pillBtn, padding: "10px 20px" }}>Cancel</button>
+          <button onClick={handleSave} style={{ ...pillBtn, padding: "10px 20px", background: "rgba(78,205,196,0.15)", color: "#4ECDC4", border: "1px solid rgba(78,205,196,0.3)" }}>Save</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// --- Main App ---
+function InsLogger() {
+  const [config, setConfig] = useState(loadConfig);
+  const [tags, setTags] = useState(loadTags);
+  const [text, setText] = useState("");
+  const [selectedTags, setSelectedTags] = useState([]);
+  const [view, setView] = useState("main"); // main | history | tags | setup
+  const [logState, setLogState] = useState("idle"); // idle | logging | ok | error
+  const [logError, setLogError] = useState("");
+  const [showMore, setShowMore] = useState(false);
+  const [toast, setToast] = useState("");
+  const textareaRef = useRef(null);
+
+  useEffect(() => { saveTags(tags); }, [tags]);
+
+  const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(""), 2000); };
+
+  const handleLog = async () => {
+    const trimmed = text.trim();
+    if (!trimmed || !config || logState === "logging") return;
+    setLogState("logging"); setLogError("");
+    try {
+      const { content, sha } = await githubGet(config);
+      const entry = formatLogEntry(Date.now(), selectedTags, trimmed);
+      const newContent = content ? content.trimEnd() + "\n" + entry + "\n" : entry + "\n";
+      await githubPut(config, newContent, sha);
+      saveCache(newContent);
+      setText(""); setSelectedTags([]);
+      setLogState("ok");
+      showToast("Logged");
+      setTimeout(() => setLogState("idle"), 1500);
+      if (textareaRef.current) textareaRef.current.focus();
+    } catch (e) {
+      setLogState("error"); setLogError(e.message);
+      setTimeout(() => setLogState("idle"), 4000);
+    }
+  };
+
+  const handleSaveConfig = (c) => { saveConfig(c); setConfig(c); setView("main"); };
+  const handleSaveTags = (t) => { setTags(t); setSelectedTags((p) => p.filter((x) => t.includes(x))); };
+
+  const toggleTag = (tag) => {
+    setSelectedTags((p) => p.includes(tag) ? p.filter((t) => t !== tag) : [...p, tag]);
+  };
+
+  if (!config || view === "setup") {
+    return <SetupView initial={config} onSave={handleSaveConfig} />;
+  }
+  if (view === "history") {
+    return <HistoryView config={config} tags={tags} onBack={() => setView("main")} />;
+  }
+  if (view === "tags") {
+    return <TagEditorView tags={tags} onSave={handleSaveTags} onBack={() => setView("main")} />;
+  }
+
+  const hasContent = text.trim().length > 0;
+  const isLogging = logState === "logging";
+
+  return (
+    <div style={{
+      height: "100%", display: "flex", flexDirection: "column",
+      background: "#0f0f1a", color: "#fff",
+      fontFamily: "'SF Mono', 'Fira Code', monospace",
+      userSelect: "none", WebkitUserSelect: "none",
+    }}>
+      {/* Top bar */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px", borderBottom: "1px solid rgba(255,255,255,0.08)", flexShrink: 0 }}>
+        <span style={{ fontSize: 14, fontWeight: 700, letterSpacing: 2, color: "rgba(255,255,255,0.6)" }}>INS LOGGER</span>
+        <div style={{ display: "flex", gap: 8, position: "relative" }}>
+          <button onClick={() => setView("history")} style={pillBtn}>History</button>
+          <button onClick={() => setShowMore((v) => !v)} style={{ ...pillBtn, ...(showMore ? { background: "rgba(78,205,196,0.15)", color: "#4ECDC4", border: "1px solid rgba(78,205,196,0.3)" } : {}) }}>
+            More {showMore ? "\u25B2" : "\u25BC"}
+          </button>
+          {showMore && (
+            <div style={{ position: "absolute", top: "100%", right: 0, marginTop: 6, zIndex: 50, background: "#1a1a2e", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 10, overflow: "hidden", minWidth: 120 }}>
+              <button onClick={() => { setView("tags"); setShowMore(false); }}
+                style={menuItem}>Edit Tags</button>
+              <button onClick={() => { setView("setup"); setShowMore(false); }}
+                style={{ ...menuItem, borderBottom: "none" }}>Settings</button>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Text area */}
+      <div style={{ flex: 1, padding: "16px 16px 0", display: "flex", flexDirection: "column", overflow: "hidden" }}>
+        <textarea ref={textareaRef} value={text} onChange={(e) => setText(e.target.value)}
+          placeholder="What's on your mind..."
+          style={{
+            flex: 1, width: "100%", minHeight: 120,
+            background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)",
+            borderRadius: 12, color: "#fff", padding: 16, fontSize: 15,
+            fontFamily: "inherit", resize: "none", outline: "none",
+            boxSizing: "border-box", lineHeight: 1.7,
+            userSelect: "text", WebkitUserSelect: "text",
+          }} />
+      </div>
+
+      {/* Tags */}
+      <div style={{ padding: "12px 16px 0", flexShrink: 0 }}>
+        <div style={{ fontSize: 10, color: "rgba(255,255,255,0.2)", marginBottom: 8, letterSpacing: 1 }}>TAGS</div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+          {tags.map((tag) => {
+            const sel = selectedTags.includes(tag);
+            const c = getTagColor(tag, tags);
+            return (
+              <button key={tag} onClick={() => toggleTag(tag)}
+                style={{
+                  padding: "6px 14px", borderRadius: 8, fontSize: 12, fontWeight: 600,
+                  cursor: "pointer", fontFamily: "inherit", transition: "all 0.15s",
+                  background: sel ? c + "20" : "rgba(255,255,255,0.04)",
+                  color: sel ? c : "rgba(255,255,255,0.4)",
+                  border: sel ? `1px solid ${c}50` : "1px solid rgba(255,255,255,0.06)",
+                }}>{tag}</button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Log button */}
+      <div style={{ padding: 16, flexShrink: 0 }}>
+        {logState === "error" && (
+          <div style={{ fontSize: 11, color: "#FF6B6B", marginBottom: 8, lineHeight: 1.5 }}>
+            Failed: {logError}
+          </div>
+        )}
+        <button onClick={handleLog} disabled={!hasContent || isLogging}
+          style={{
+            width: "100%", height: 52, borderRadius: 14,
+            background: isLogging ? "rgba(255,230,77,0.08)" : hasContent ? "rgba(78,205,196,0.12)" : "rgba(255,255,255,0.03)",
+            border: isLogging ? "1.5px solid rgba(255,230,77,0.3)" : hasContent ? "1.5px solid rgba(78,205,196,0.3)" : "1.5px solid rgba(255,255,255,0.06)",
+            color: isLogging ? "#FFE66D" : hasContent ? "#4ECDC4" : "rgba(255,255,255,0.15)",
+            fontSize: 15, fontWeight: 700, letterSpacing: 2,
+            cursor: hasContent && !isLogging ? "pointer" : "default",
+            fontFamily: "inherit", transition: "all 0.2s",
+          }}>
+          {isLogging ? "LOGGING..." : "LOG"}
+        </button>
+      </div>
+
+      {toast && <div style={toastStyle}>{toast}</div>}
+    </div>
+  );
+}
+
+const pillBtn = {
+  background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)",
+  borderRadius: 8, color: "rgba(255,255,255,0.6)", fontSize: 12,
+  padding: "6px 14px", cursor: "pointer", fontFamily: "inherit", fontWeight: 600,
+};
+
+const menuItem = {
+  display: "block", width: "100%", padding: "10px 16px", background: "transparent",
+  border: "none", borderBottom: "1px solid rgba(255,255,255,0.06)",
+  color: "rgba(255,255,255,0.7)", fontSize: 13, fontFamily: "inherit",
+  fontWeight: 600, cursor: "pointer", textAlign: "left",
+};
+
+const inputStyle = {
+  width: "100%", background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)",
+  borderRadius: 10, color: "#fff", padding: 14, fontSize: 14,
+  fontFamily: "inherit", outline: "none", boxSizing: "border-box",
+};
+
+const labelStyle = { fontSize: 12, color: "rgba(255,255,255,0.4)", marginBottom: 6 };
+
+const toastStyle = {
+  position: "fixed", bottom: 80, left: "50%", transform: "translateX(-50%)",
+  background: "rgba(255,255,255,0.12)", backdropFilter: "blur(10px)",
+  color: "#fff", padding: "8px 20px", borderRadius: 20,
+  fontSize: 13, fontWeight: 500, zIndex: 200, border: "1px solid rgba(255,255,255,0.1)",
+};
+
+ReactDOM.createRoot(document.getElementById("root")).render(<InsLogger />);
+</script>
+</body>
+</html>
