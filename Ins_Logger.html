@@ -214,6 +214,12 @@ function HistoryView({ config, tags, onBack }) {
   const [entries, setEntries] = useState(() => parseLogFile(loadCache()));
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [filterTags, setFilterTags] = useState([]);
+  const [editingEntry, setEditingEntry] = useState(null);
+  const [editText, setEditText] = useState("");
+  const [editSelectedTags, setEditSelectedTags] = useState([]);
+  const [saving, setSaving] = useState(false);
+  const [expandedIdx, setExpandedIdx] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -231,7 +237,21 @@ function HistoryView({ config, tags, onBack }) {
     return () => { cancelled = true; };
   }, []);
 
-  const sorted = [...entries].reverse();
+  const toggleFilterTag = (tag) => {
+    setFilterTags(p => p.includes(tag) ? p.filter(t => t !== tag) : [...p, tag]);
+    setExpandedIdx(null);
+  };
+
+  const clearFilters = () => {
+    setFilterTags([]);
+    setExpandedIdx(null);
+  };
+
+  const filteredEntries = filterTags.length > 0
+    ? entries.filter(e => filterTags.every(f => e.tags.includes(f)))
+    : entries;
+
+  const sorted = [...filteredEntries].reverse();
   const grouped = {};
   sorted.forEach((e) => {
     const d = new Date(e.ts);
@@ -241,7 +261,142 @@ function HistoryView({ config, tags, onBack }) {
   });
   const dateKeys = Object.keys(grouped);
 
-  const [expandedIdx, setExpandedIdx] = useState(null);
+  const startEdit = (entry) => {
+    setEditingEntry(entry);
+    setEditText(entry.text);
+    setEditSelectedTags([...entry.tags]);
+    setExpandedIdx(null);
+  };
+
+  const cancelEdit = () => {
+    setEditingEntry(null);
+    setEditText("");
+    setEditSelectedTags([]);
+  };
+
+  const toggleEditTag = (tag) => {
+    setEditSelectedTags(p => p.includes(tag) ? p.filter(t => t !== tag) : [...p, tag]);
+  };
+
+  const saveEdit = async () => {
+    if (!editingEntry || !editText.trim() || saving) return;
+    setSaving(true);
+    try {
+      const { content, sha } = await githubGet(config);
+      const allEntries = parseLogFile(content);
+      const newEntries = allEntries.map(e =>
+        e.ts === editingEntry.ts && e.text === editingEntry.text
+          ? { ...e, text: editText.trim(), tags: editSelectedTags }
+          : e
+      );
+      const newContent = newEntries
+        .map(e => formatLogEntry(e.ts, e.tags, e.text))
+        .join("\n") + "\n";
+      await githubPut(config, newContent, sha);
+      saveCache(newContent);
+      setEntries(newEntries);
+      setEditingEntry(null);
+      setEditText("");
+      setEditSelectedTags([]);
+    } catch (e) {
+      setError(e.message);
+    }
+    setSaving(false);
+  };
+
+  const deleteEntry = async (entry) => {
+    if (!confirm(`Delete this entry?\n\n${entry.text.slice(0, 100)}${entry.text.length > 100 ? "..." : ""}`)) return;
+    setSaving(true);
+    try {
+      const { content, sha } = await githubGet(config);
+      const allEntries = parseLogFile(content);
+      const newEntries = allEntries.filter(e => !(e.ts === entry.ts && e.text === entry.text));
+      const newContent = newEntries.length > 0
+        ? newEntries.map(e => formatLogEntry(e.ts, e.tags, e.text)).join("\n") + "\n"
+        : "";
+      await githubPut(config, newContent, sha);
+      saveCache(newContent);
+      setEntries(newEntries);
+      setExpandedIdx(null);
+    } catch (e) {
+      setError(e.message);
+    }
+    setSaving(false);
+  };
+
+  if (editingEntry) {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", height: "100%", background: "#0f0f1a", color: "#fff", fontFamily: "'SF Mono', 'Fira Code', monospace" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 16px", borderBottom: "1px solid rgba(255,255,255,0.08)", flexShrink: 0 }}>
+          <button onClick={cancelEdit} style={pillBtn}>← Cancel</button>
+          <span style={{ fontSize: 12, color: "rgba(255,255,255,0.3)" }}>Edit Entry</span>
+        </div>
+
+        <div style={{ flex: 1, overflow: "auto", padding: "12px 16px" }}>
+          <div style={{ marginBottom: 12 }}>
+            <div style={{ fontSize: 12, color: "rgba(255,255,255,0.4)", marginBottom: 6 }}>Created: {formatDate(editingEntry.ts)}</div>
+          </div>
+          <textarea value={editText} onChange={(e) => setEditText(e.target.value)}
+            style={{
+              width: "100%", minHeight: "30vh",
+              background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.08)",
+              borderRadius: 12, color: "#fff", padding: 14, fontSize: 15,
+              fontFamily: "inherit", resize: "vertical", outline: "none",
+              boxSizing: "border-box", lineHeight: 1.7,
+            }} />
+          <div style={{ marginTop: 12 }}>
+            <div style={{ fontSize: 12, color: "rgba(255,255,255,0.4)", marginBottom: 8 }}>Tags</div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+              {tags.map((tag) => {
+                const sel = editSelectedTags.includes(tag);
+                const c = getTagColor(tag, tags);
+                return (
+                  <button key={tag} onClick={() => toggleEditTag(tag)}
+                    style={{
+                      padding: "5px 12px", borderRadius: 8, fontSize: 12, fontWeight: 600,
+                      cursor: "pointer", fontFamily: "inherit", transition: "all 0.15s",
+                      background: sel ? c + "20" : "rgba(255,255,255,0.04)",
+                      color: sel ? c : "rgba(255,255,255,0.4)",
+                      border: sel ? `1px solid ${c}50` : "1px solid rgba(255,255,255,0.06)",
+                    }}>{tag}</button>
+                );
+              })}
+            </div>
+          </div>
+          {error && <div style={{ padding: "12px 0", fontSize: 12, color: "#FF6B6B" }}>{error}</div>}
+        </div>
+
+        <div style={{ flexShrink: 0, padding: "8px 16px 16px", paddingBottom: "max(12px, env(safe-area-inset-bottom))" }}>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={() => deleteEntry(editingEntry)} disabled={saving}
+              style={{
+                flex: 1, height: 46, borderRadius: 12,
+                background: "rgba(255,107,107,0.12)",
+                border: "1.5px solid rgba(255,107,107,0.3)",
+                color: "#FF6B6B",
+                fontSize: 15, fontWeight: 700, letterSpacing: 2,
+                cursor: !saving ? "pointer" : "default",
+                opacity: saving ? 0.5 : 1,
+              }}>
+              DELETE
+            </button>
+            <button onClick={saveEdit} disabled={saving || !editText.trim()}
+              style={{
+                flex: 2, height: 46, borderRadius: 12,
+                background: "rgba(78,205,196,0.12)",
+                border: "1.5px solid rgba(78,205,196,0.3)",
+                color: "#4ECDC4",
+                fontSize: 15, fontWeight: 700, letterSpacing: 2,
+                cursor: editText.trim() && !saving ? "pointer" : "default",
+                opacity: (!editText.trim() || saving) ? 0.5 : 1,
+              }}>
+              {saving ? "SAVING..." : "SAVE"}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", background: "#0f0f1a", color: "#fff", fontFamily: "'SF Mono', 'Fira Code', monospace" }}>
@@ -249,9 +404,43 @@ function HistoryView({ config, tags, onBack }) {
         <button onClick={onBack} style={pillBtn}>← Back</button>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           {loading && <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#FFE66D", animation: "pulse 1s infinite" }} />}
-          <span style={{ fontSize: 12, color: "rgba(255,255,255,0.3)" }}>{entries.length} entries</span>
+          <span style={{ fontSize: 12, color: "rgba(255,255,255,0.3)" }}>{filteredEntries.length}/{entries.length} entries</span>
         </div>
       </div>
+
+      {tags.length > 0 && (
+        <div style={{ padding: "8px 16px", borderBottom: "1px solid rgba(255,255,255,0.04)", flexShrink: 0 }}>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 4, alignItems: "center" }}>
+            {tags.map((tag) => {
+              const active = filterTags.includes(tag);
+              const c = getTagColor(tag, tags);
+              return (
+                <button key={tag} onClick={() => toggleFilterTag(tag)}
+                  style={{
+                    fontSize: 10, padding: "2px 8px", borderRadius: 4,
+                    background: active ? c + "20" : "rgba(255,255,255,0.04)",
+                    color: active ? c : "rgba(255,255,255,0.4)",
+                    border: active ? `1px solid ${c}40` : "1px solid rgba(255,255,255,0.08)",
+                    cursor: "pointer",
+                  }}>
+                  {tag}
+                </button>
+              );
+            })}
+            {filterTags.length > 0 && (
+              <button onClick={clearFilters} style={{
+                fontSize: 10, padding: "2px 8px", borderRadius: 4,
+                background: "rgba(255,255,255,0.08)",
+                color: "rgba(255,255,255,0.6)",
+                border: "1px solid rgba(255,255,255,0.15)",
+                cursor: "pointer",
+              }}>
+                Clear
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       <div style={{ flex: 1, overflow: "auto", padding: "4px 16px 80px" }}>
         {error && <div style={{ padding: "12px 0", fontSize: 12, color: "#FF6B6B" }}>{error}</div>}
@@ -289,8 +478,14 @@ function HistoryView({ config, tags, onBack }) {
                   )}
                   {isExpanded && (
                     <div style={{ marginTop: 6 }} onClick={(e) => e.stopPropagation()}>
-                      <button onClick={() => navigator.clipboard.writeText(entry.text).catch(() => {})}
-                        style={{ ...pillBtn, fontSize: 10, padding: "3px 10px" }}>Copy</button>
+                      <div style={{ display: "flex", gap: 6 }}>
+                        <button onClick={() => navigator.clipboard.writeText(entry.text).catch(() => {})}
+                          style={{ ...pillBtn, fontSize: 10, padding: "3px 10px" }}>Copy</button>
+                        <button onClick={() => startEdit(entry)}
+                          style={{ ...pillBtn, fontSize: 10, padding: "3px 10px", background: "rgba(255,230,77,0.12)", color: "#FFE66D", border: "1px solid rgba(255,230,77,0.3)" }}>Edit</button>
+                        <button onClick={() => deleteEntry(entry)}
+                          style={{ ...pillBtn, fontSize: 10, padding: "3px 10px", background: "rgba(255,107,107,0.12)", color: "#FF6B6B", border: "1px solid rgba(255,107,107,0.3)" }}>Delete</button>
+                      </div>
                     </div>
                   )}
                 </div>
